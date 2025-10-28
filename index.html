@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Invoice Reconciliation Tool</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.2/papaparse.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gradient-to-br from-blue-50 to-indigo-100 min-h-screen p-8">
+    <div class="max-w-7xl mx-auto">
+        <div class="bg-white rounded-2xl shadow-xl p-8">
+            <div class="flex justify-between items-start mb-8">
+                <div>
+                    <h1 class="text-4xl font-bold text-gray-800 mb-2">Invoice Reconciliation Tool</h1>
+                    <p class="text-gray-600">Compare invoice files with master Excel data</p>
+                </div>
+                <button id="resetBtn" class="hidden bg-gray-600 text-white px-6 py-3 rounded-lg hover:bg-gray-700 transition font-semibold">Reset All</button>
+            </div>
+
+            <div id="errorBox" class="hidden bg-red-50 border border-red-200 rounded-lg p-4 mb-6">
+                <span class="text-red-700" id="errorText"></span>
+            </div>
+
+            <div class="grid md:grid-cols-2 gap-6 mb-6">
+                <div class="border-2 border-dashed border-indigo-300 rounded-xl p-6 bg-indigo-50">
+                    <h2 class="text-xl font-semibold text-gray-800 mb-2">Invoice Files</h2>
+                    <p class="text-sm text-gray-600 mb-4">Upload PDF, Excel, or CSV files (any filename)</p>
+                    <label class="cursor-pointer block">
+                        <input type="file" id="invoiceInput" multiple accept=".xlsx,.xls,.csv,.pdf" class="hidden">
+                        <div class="bg-white border-2 border-indigo-400 rounded-lg p-6 text-center hover:bg-indigo-50 transition">
+                            <p class="text-gray-700 font-medium">📁 Click to upload</p>
+                            <p class="text-sm text-gray-500 mt-1">PDF, Excel, or CSV files</p>
+                        </div>
+                    </label>
+                    <div id="invoiceFileList" class="mt-4"></div>
+                </div>
+
+                <div class="border-2 border-dashed border-green-300 rounded-xl p-6 bg-green-50">
+                    <h2 class="text-xl font-semibold text-gray-800 mb-2">Master Excel File</h2>
+                    <p class="text-sm text-gray-600 mb-4">PRODNOCOMPANY, STYLE, FOBCOST, SIZE, SHIPPEDQTY</p>
+                    <label class="cursor-pointer block">
+                        <input type="file" id="masterInput" accept=".xlsx,.xls" class="hidden">
+                        <div class="bg-white border-2 border-green-400 rounded-lg p-6 text-center hover:bg-green-50 transition">
+                            <p class="text-gray-700 font-medium">📁 Click to upload</p>
+                            <p class="text-sm text-gray-500 mt-1">Excel file</p>
+                        </div>
+                    </label>
+                    <div id="masterFileInfo" class="mt-4"></div>
+                </div>
+            </div>
+
+            <div id="processLog" class="hidden bg-gray-50 rounded-lg p-4 mb-6 max-h-40 overflow-y-auto">
+                <p class="text-sm font-semibold text-gray-700 mb-2">Process Log:</p>
+                <div id="logContent" class="text-xs text-gray-600 font-mono"></div>
+            </div>
+
+            <button id="reconcileBtn" disabled class="w-full bg-indigo-600 text-white font-semibold py-4 rounded-lg hover:bg-indigo-700 transition disabled:bg-gray-300 disabled:cursor-not-allowed text-lg mb-6">Reconcile Invoices</button>
+
+            <div id="resultsContainer" class="hidden"></div>
+        </div>
+    </div>
+
+    <script>
+        let invoicesData = [];
+        let masterData = [];
+        let reconciliationResults = [];
+
+        const addLog = (msg) => {
+            const log = document.getElementById('logContent');
+            const p = document.createElement('p');
+            p.textContent = new Date().toLocaleTimeString() + ': ' + msg;
+            log.appendChild(p);
+            document.getElementById('processLog').classList.remove('hidden');
+        };
+
+        const showError = (msg) => {
+            document.getElementById('errorText').textContent = msg;
+            document.getElementById('errorBox').classList.remove('hidden');
+        };
+
+        const hideError = () => {
+            document.getElementById('errorBox').classList.add('hidden');
+        };
+
+        const normalizeValue = (val) => {
+            if (!val && val !== 0) return '';
+            return val.toString().toLowerCase().trim().replace(/\s+/g, ' ');
+        };
+
+        const findColumn = (row, names) => {
+            const keys = Object.keys(row);
+            for (const key of keys) {
+                const nk = key.toLowerCase().trim().replace(/\s+/g, '');
+                for (const name of names) {
+                    const nn = name.toLowerCase().trim().replace(/\s+/g, '');
+                    if (nk.includes(nn) || nn.includes(nk)) return key;
+                }
+            }
+            return null;
+        };
+
+        const parsePDF = async (file) => {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = async (e) => {
+                    try {
+                        const uint8Array = new Uint8Array(e.target.result);
+                        let text = '';
+                        
+                        for (let i = 0; i < uint8Array.length; i++) {
+                            if (uint8Array[i] >= 32 && uint8Array[i] <= 126) {
+                                text += String.fromCharCode(uint8Array[i]);
+                            } else if (uint8Array[i] === 10 || uint8Array[i] === 13) {
+                                text += '\n';
+                            }
+                        }
+                        
+                        const lines = text.split('\n').filter(line => line.trim().length > 3);
+                        const data = [];
+                        
+                        for (let i = 0; i < lines.length; i++) {
+                            const line = lines[i].trim();
+                            if (line.includes('obj') || line.includes('endobj') || line.includes('stream')) continue;
+                            
+                            const numberMatches = line.match(/[\d,]+\.?\d*/g);
+                            if (numberMatches && numberMatches.length >= 2) {
+                                const firstNumberIndex = line.search(/\d/);
+                                if (firstNumberIndex > 5) {
+                                    const productText = line.substring(0, firstNumberIndex).trim();
+                                    if (productText.length > 2) {
+                                        data.push({
+                                            'Product': productText,
+                                            'Size': '',
+                                            'Quantity': numberMatches[0]?.replace(/,/g, '') || '',
+                                            'Price': numberMatches[1]?.replace(/,/g, '') || ''
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        
+                        addLog('PDF parsed: ' + data.length + ' rows extracted');
+                        resolve({ invoice: data, isPDF: true });
+                    } catch (err) {
+                        reject(new Error('PDF parsing failed: ' + err.message));
+                    }
+                };
+                reader.onerror = reject;
+                reader.readAsArrayBuffer(file);
+            });
+        };
+
+        const parseExcel = (file) => {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    try {
+                        const data = new Uint8Array(e.target.result);
+                        const wb = XLSX.read(data, { type: 'array' });
+                        
+                        // Look for Invoice and Packing List tabs (flexible naming)
+                        const invTab = wb.SheetNames.find(n => /inv|invoice|ci/i.test(n));
+                        const plTab = wb.SheetNames.find(n => /pl|packing|pack/i.test(n));
+
+                        const result = {};
+                        
+                        if (invTab) {
+                            const sheet = wb.Sheets[invTab];
+                            let raw = XLSX.utils.sheet_to_json(sheet, { defval: '', raw: false, header: 1 });
+                            
+                            let hIdx = -1;
+                            for (let i = 0; i < Math.min(10, raw.length); i++) {
+                                if (!raw[i] || !raw[i].length) continue;
+                                const str = raw[i].join('|').toLowerCase();
+                                if (str.includes('po') || str.includes('product') || str.includes('fob')) {
+                                    hIdx = i;
+                                    break;
+                                }
+                            }
+                            
+                            if (hIdx >= 0) {
+                                const headers = raw[hIdx];
+                                const rows = raw.slice(hIdx + 1);
+                                result.invoice = rows.map(row => {
+                                    const obj = {};
+                                    headers.forEach((h, idx) => { if (h) obj[h] = row[idx] || ''; });
+                                    return obj;
+                                }).filter(r => Object.values(r).some(v => v !== ''));
+                            }
+                        }
+                        
+                        if (plTab) {
+                            const sheet = wb.Sheets[plTab];
+                            let raw = XLSX.utils.sheet_to_json(sheet, { defval: '', raw: false, header: 1 });
+                            
+                            let hIdx = -1;
+                            for (let i = 0; i < Math.min(10, raw.length); i++) {
+                                if (!raw[i] || !raw[i].length) continue;
+                                const str = raw[i].join('|').toLowerCase();
+                                if (str.includes('carton') || str.includes('destination') || str.includes('po')) {
+                                    hIdx = i;
+                                    break;
+                                }
+                            }
+                            
+                            if (hIdx >= 0) {
+                                const headers = raw[hIdx];
+                                const rows = raw.slice(hIdx + 1);
+                                result.packingList = rows.map(row => {
+                                    const obj = {};
+                                    headers.forEach((h, idx) => { if (h) obj[h] = row[idx] || ''; });
+                                    return obj;
+                                }).filter(r => Object.values(r).some(v => v !== ''));
+                            }
+                        }
+                        
+                        resolve(result);
+                    } catch (err) {
+                        reject(err);
+                    }
+                };
+                reader.onerror = reject;
+                reader.readAsArrayBuffer(file);
+            });
+        };
+
+        document.getElementById('invoiceInput').addEventListener('change', async (e) => {
+            hideError();
+            const files = Array.from(e.target.files);
+            invoicesData = [];
+            
+            for (const file of files) {
+                addLog('Processing ' + file.name);
+                try {
+                    const ext = file.name.split('.').pop().toLowerCase();
+                    let data;
+                    
+                    if (ext === 'pdf') {
+                        data = await parsePDF(file);
+                        invoicesData.push({ fileName: file.name, data, type: 'pdf' });
+                    } else if (ext === 'xlsx' || ext === 'xls') {
+                        data = await parseExcel(file);
+                        invoicesData.push({ fileName: file.name, data, type: 'excel' });
+                    } else if (ext === 'csv') {
+                        // Handle CSV later if needed
+                        addLog('CSV files: Please convert to Excel for better results');
+                    }
+                } catch (err) {
+                    showError('Error: ' + file.name + ' - ' + err.message);
+                }
+            }
+            
+            const list = document.getElementById('invoiceFileList');
+            list.innerHTML = '<p class="text-sm font-medium text-gray-700 mb-2">' + files.length + ' file(s)</p>';
+            files.forEach(f => {
+                const div = document.createElement('div');
+                div.className = 'text-sm bg-white rounded px-3 py-2 mb-1';
+                const icon = f.name.endsWith('.pdf') ? '📄' : '📊';
+                div.textContent = icon + ' ' + f.name;
+                list.appendChild(div);
+            });
+            
+            updateBtn();
+            document.getElementById('resetBtn').classList.remove('hidden');
+        });
+
+        document.getElementById('masterInput').addEventListener('change', async (e) => {
+            hideError();
+            const file = e.target.files[0];
+            if (!file) return;
+            
+            addLog('Loading master: ' + file.name);
+            try {
+                const data = new Uint8Array(await file.arrayBuffer());
+                const wb = XLSX.read(data, { type: 'array' });
+                const sheet = wb.Sheets[wb.SheetNames[0]];
+                masterData = XLSX.utils.sheet_to_json(sheet, { defval: '', raw: false });
+                
+                addLog('Master loaded: ' + masterData.length + ' rows');
+                
+                document.getElementById('masterFileInfo').innerHTML = 
+                    '<p class="text-sm font-medium text-gray-700 mb-2">Master file:</p>' +
+                    '<div class="text-sm bg-white rounded px-3 py-2">' + file.name + '</div>' +
+                    '<p class="text-xs text-gray-500 mt-2">' + masterData.length + ' rows</p>';
+            } catch (err) {
+                showError('Master error: ' + err.message);
+            }
+            
+            updateBtn();
+            document.getElementById('resetBtn').classList.remove('hidden');
+        });
+
+        const updateBtn = () => {
+            document.getElementById('reconcileBtn').disabled = !invoicesData.length || !masterData.length;
+        };
+
+        document.getElementById('reconcileBtn').addEventListener('click', reconcile);
+
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            invoicesData = [];
+            masterData = [];
+            reconciliationResults = [];
+            document.getElementById('invoiceInput').value = '';
+            document.getElementById('masterInput').value = '';
+            document.getElementById('invoiceFileList').innerHTML = '';
+            document.getElementById('masterFileInfo').innerHTML = '';
+            document.getElementById('processLog').classList.add('hidden');
+            document.getElementById('logContent').innerHTML = '';
+            document.getElementById('resultsContainer').classList.add('hidden');
+            document.getElementById('resetBtn').classList.add('hidden');
+            hideError();
+            updateBtn();
+        });
+
+        function reconcile() {
+            hideError();
+            document.getElementById('logContent').innerHTML = '';
+            addLog('Starting reconciliation...');
+            
+            const allResults = [];
+            
+            // Build master map for PDF matching
+            const masterStyleMap = new Map();
+            masterData.forEach(row => {
+                const sCol = findColumn(row, ['style']);
+                if (sCol && row[sCol]) {
+                    const style = normalizeValue(row[sCol]);
+                    if (!masterStyleMap.has(style)) {
+                        masterStyleMap.set(style, []);
+                    }
+                    masterStyleMap.get(style).push(row);
+                }
+            });
+            
+            invoicesData.forEach(invFile => {
+                addLog('Processing ' + invFile.fileName);
+                const results = [];
+                let items = [];
+                
+                // Handle PDF files
+                if (invFile.type === 'pdf') {
+                    const pdfData = invFile.data.invoice || [];
+                    addLog('PDF file detected - using exact match with master data');
+                    
+                    pdfData.forEach(row => {
+                        const product = row['Product'] || '';
+                        const qty = row['Quantity'] || '';
+                        const price = row['Price'] || '';
+                        
+                        // EXACT match only - no fuzzy matching
+                        const normalizedProduct = normalizeValue(product);
+                        let matched = false;
+                        
+                        for (const [style, masterRows] of masterStyleMap) {
+                            if (normalizedProduct === style) {
+                                // Exact match found
+                                masterRows.forEach(mRow => {
+                                    const szCol = findColumn(mRow, ['size']);
+                                    items.push({
+                                        po: '',
+                                        productId: product,
+                                        size: szCol ? mRow[szCol] : '',
+                                        qty: qty,
+                                        fob: price
+                                    });
+                                });
+                                matched = true;
+                                break;
+                            }
+                        }
+                        
+                        if (!matched) {
+                            // No exact match - add as is
+                            items.push({
+                                po: '',
+                                productId: product,
+                                size: '',
+                                qty: qty,
+                                fob: price
+                            });
+                        }
+                    });
+                } else {
+                    // Handle Excel files
+                    const invData = invFile.data.invoice || [];
+                    const plData = invFile.data.packingList || [];
+                    
+                    if (plData.length > 0) {
+                        const fobMap = new Map();
+                        invData.forEach(row => {
+                            const pCol = findColumn(row, ['product id', 'productid', 'product', 'style']);
+                            const fCol = findColumn(row, ['fob per unit (usd)', 'fob per unit', 'fob', 'unit price', 'price']);
+                            if (pCol && fCol && row[pCol]) {
+                                fobMap.set(normalizeValue(row[pCol]), row[fCol]);
+                            }
+                        });
+                        
+                        const sizes = ['OS', 'XS', 'S', 'M', 'L', 'XL', 'XXL', '2XL', '3XL'];
+                        
+                        plData.forEach(row => {
+                            const poCol = findColumn(row, ['po #', 'po#', 'po', 'po number']);
+                            const pCol = findColumn(row, ['product id', 'productid', 'product', 'style']);
+                            
+                            const po = row[poCol] || '';
+                            const pid = row[pCol] || '';
+                            const fob = fobMap.get(normalizeValue(pid)) || '';
+                            
+                            Object.keys(row).forEach(col => {
+                                const uc = col.toUpperCase().trim();
+                                if (sizes.includes(uc)) {
+                                    const qty = row[col];
+                                    if (qty && qty !== '' && qty !== '0' && parseFloat(qty) > 0) {
+                                        items.push({ po, productId: pid, size: uc, qty, fob });
+                                    }
+                                }
+                            });
+                        });
+                    }
+                }
+                
+                // Aggregate
+                const agg = new Map();
+                items.forEach(item => {
+                    const key = normalizeValue(item.po) + '_' + normalizeValue(item.productId) + '_' + normalizeValue(item.size);
+                    if (agg.has(key)) {
+                        const ex = agg.get(key);
+                        const eq = parseFloat(normalizeValue(ex.qty).replace(/[^0-9.-]/g, '')) || 0;
+                        const nq = parseFloat(normalizeValue(item.qty).replace(/[^0-9.-]/g, '')) || 0;
+                        ex.qty = (eq + nq).toString();
+                    } else {
+                        agg.set(key, { ...item });
+                    }
+                });
+                
+                const final = Array.from(agg.values());
+                addLog('Aggregated to ' + final.length + ' items');
+                
+                // Master map
+                const mMap = new Map();
+                masterData.forEach(row => {
+                    const sCol = findColumn(row, ['style']);
+                    const szCol = findColumn(row, ['size']);
+                    const fCol = findColumn(row, ['fobcost', 'fob']);
+                    const qCol = findColumn(row, ['shippedqty', 'shipped', 'quantity', 'qty']);
+                    const pnCol = findColumn(row, ['prodnocompany', 'prodno', 'po']);
+                    
+                    const s = normalizeValue(row[sCol]);
+                    const sz = normalizeValue(row[szCol]);
+                    const key = s + '_' + sz;
+                    
+                    mMap.set(key, {
+                        prodNoCompany: row[pnCol] || '',
+                        style: row[sCol] || '',
+                        fobCost: row[fCol] || '',
+                        size: row[szCol] || '',
+                        shippedQty: row[qCol] || ''
+                    });
+                });
+                
+                // Compare
+                final.forEach(item => {
+                    if (!item.productId) return;
+                    
+                    const s = normalizeValue(item.productId);
+                    const sz = normalizeValue(item.size);
+                    const key = s + '_' + sz;
+                    const mItem = mMap.get(key);
+                    
+                    const issues = [];
+                    let status = 'Matched';
+                    
+                    if (!mItem) {
+                        issues.push('Not found in master');
+                        status = 'Missing';
+                    } else {
+                        const iFob = parseFloat(normalizeValue(item.fob).replace(/[^0-9.-]/g, ''));
+                        const mFob = parseFloat(normalizeValue(mItem.fobCost).replace(/[^0-9.-]/g, ''));
+                        
+                        if (!isNaN(iFob) && !isNaN(mFob) && Math.abs(iFob - mFob) > 0.01) {
+                            issues.push('FOB mismatch (Inv:' + item.fob + ' Mas:' + mItem.fobCost + ')');
+                            status = 'Issue';
+                        }
+                        
+                        const iQty = parseFloat(normalizeValue(item.qty).replace(/[^0-9.-]/g, ''));
+                        const mQty = parseFloat(normalizeValue(mItem.shippedQty).replace(/[^0-9.-]/g, ''));
+                        
+                        if (!isNaN(iQty) && !isNaN(mQty) && Math.abs(iQty - mQty) > 0.01) {
+                            issues.push('Qty mismatch (Inv:' + item.qty + ' Mas:' + mItem.shippedQty + ')');
+                            status = 'Issue';
+                        }
+                    }
+                    
+                    results.push({
+                        SOURCE_FILE: invFile.fileName,
+                        PRODNOCOMPANY: item.po,
+                        STYLE: item.productId,
+                        SIZE: item.size,
+                        FOBCOST: item.fob,
+                        SHIPPEDQTY: item.qty,
+                        MASTER_FOBCOST: mItem?.fobCost || '',
+                        MASTER_SHIPPEDQTY: mItem?.shippedQty || '',
+                        STATUS: status,
+                        ISSUES: issues.join(', ') || 'Good'
+                    });
+                });
+                
+                allResults.push({ fileName: invFile.fileName, results });
+                addLog('✓ Done: ' + results.length + ' items');
+            });
+            
+            reconciliationResults = allResults;
+            displayResults();
+        }
+
+        function displayResults() {
+            const cont = document.getElementById('resultsContainer');
+            cont.classList.remove('hidden');
+            
+            let html = '<div class="bg-gray-50 rounded-xl p-6"><div class="flex justify-between items-center mb-6">' +
+                '<h2 class="text-2xl font-bold text-gray-800">Results</h2>' +
+                '<button onclick="exportResults()" class="bg-green-600 text-white px-6 py-3 rounded-lg hover:bg-green-700 font-semibold">Export Excel</button></div><div class="space-y-6">';
+            
+            reconciliationResults.forEach(fr => {
+                const issues = fr.results.filter(r => r.STATUS !== 'Matched').length;
+                const matched = fr.results.filter(r => r.STATUS === 'Matched').length;
+                
+                html += '<div class="bg-white rounded-lg border-2 p-6">' +
+                    '<h3 class="font-bold text-lg mb-4">' + fr.fileName + '</h3>' +
+                    '<div class="flex gap-6 mb-4 text-sm">' +
+                    '<span class="text-green-600 font-medium">✓ ' + matched + '</span>' +
+                    (issues > 0 ? '<span class="text-red-600 font-medium">✗ ' + issues + '</span>' : '') +
+                    '<span class="text-gray-600">Total: ' + fr.results.length + '</span></div>' +
+                    '<div class="overflow-x-auto"><table class="w-full text-sm">' +
+                    '<thead class="bg-gray-100"><tr>' +
+                    '<th class="px-3 py-2 text-left">SOURCE FILE</th>' +
+                    '<th class="px-3 py-2 text-left">PO#</th><th class="px-3 py-2 text-left">STYLE</th>' +
+                    '<th class="px-3 py-2 text-left">SIZE</th><th class="px-3 py-2 text-left">FOB</th>' +
+                    '<th class="px-3 py-2 text-left">QTY</th><th class="px-3 py-2 text-left">STATUS</th>' +
+                    '<th class="px-3 py-2 text-left">ISSUES</th></tr></thead><tbody>';
+                
+                fr.results.slice(0, 100).forEach(r => {
+                    const bg = r.STATUS === 'Matched' ? 'bg-green-50' : 'bg-red-50';
+                    html += '<tr class="border-t ' + bg + '">' +
+                        '<td class="px-3 py-2 text-xs">' + r.SOURCE_FILE + '</td>' +
+                        '<td class="px-3 py-2">' + r.PRODNOCOMPANY + '</td>' +
+                        '<td class="px-3 py-2">' + r.STYLE + '</td>' +
+                        '<td class="px-3 py-2">' + r.SIZE + '</td>' +
+                        '<td class="px-3 py-2">' + r.FOBCOST + '</td>' +
+                        '<td class="px-3 py-2">' + r.SHIPPEDQTY + '</td>' +
+                        '<td class="px-3 py-2">' + (r.STATUS === 'Matched' ? '<span class="text-green-700 font-medium">Good</span>' : '<span class="text-red-700 font-medium">' + r.STATUS + '</span>') + '</td>' +
+                        '<td class="px-3 py-2 text-xs">' + r.ISSUES + '</td></tr>';
+                });
+                
+                html += '</tbody></table></div></div>';
+            });
+            
+            html += '</div></div>';
+            cont.innerHTML = html;
+        }
+
+        function exportResults() {
+            const wb = XLSX.utils.book_new();
+            
+            reconciliationResults.forEach(fr => {
+                const ws = [['SOURCE_FILE', 'PRODNOCOMPANY', 'STYLE', 'SIZE', 'FOBCOST', 'SHIPPEDQTY', 'MASTER_FOBCOST', 'MASTER_SHIPPEDQTY', 'STATUS', 'ISSUES']];
+                
+                fr.results.forEach(r => {
+                    ws.push([r.SOURCE_FILE, r.PRODNOCOMPANY, r.STYLE, r.SIZE, r.FOBCOST, r.SHIPPEDQTY, r.MASTER_FOBCOST, r.MASTER_SHIPPEDQTY, r.STATUS, r.ISSUES]);
+                });
+                
+                const sheet = XLSX.utils.aoa_to_sheet(ws);
+                const name = fr.fileName.substring(0, 30).replace(/[^a-zA-Z0-9]/g, '_');
+                XLSX.utils.book_append_sheet(wb, sheet, name);
+            });
+            
+            XLSX.writeFile(wb, 'Invoice_Reconciliation_Results.xlsx');
+        }
+    </script>
+</body>
+</html>
